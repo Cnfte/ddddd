@@ -1,12 +1,18 @@
 {
   "name": "gemini-proxy",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "A Node.js proxy server for the Google Gemini API, compatible with Express 5.",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
+  "keywords": [
+    "gemini",
+    "proxy",
+    "ai",
+    "express"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
