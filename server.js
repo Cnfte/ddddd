@@ -9,7 +9,6 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// --- [前端 WebUI 模板开始] ---
 const WEB_UI_HTML = `
 <!DOCTYPE html>
 <html lang="zh-CN" class="h-full">
@@ -20,28 +19,32 @@ const WEB_UI_HTML = `
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
-        :root { --ios-curve: cubic-bezier(0.32, 0.72, 0, 1); }
-        body { font-family: -apple-system, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+        :root { --ios-ease: cubic-bezier(0.32, 0.72, 0, 1); }
+        body { font-family: -apple-system, system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+        
+        /* 彻底移除输入框选中丑框 */
+        textarea, input, select, button { outline: none !important; border: none !important; -webkit-appearance: none; }
+        textarea:focus { box-shadow: none !important; }
 
-        /* Apple 物理反馈抽屉 */
-        .drawer { transition: transform 0.6s var(--ios-curve); will-change: transform; z-index: 100; }
-        .overlay { transition: opacity 0.5s var(--ios-curve), backdrop-filter 0.5s var(--ios-curve); pointer-events: none; opacity: 0; }
-        body.sb-open .overlay { opacity: 1; backdrop-filter: blur(12px); pointer-events: auto; background: rgba(0,0,0,0.25); }
+        /* iOS 抽屉动画 */
+        .drawer { transition: transform 0.5s var(--ios-ease); will-change: transform; z-index: 100; }
+        .overlay { transition: opacity 0.4s ease; opacity: 0; pointer-events: none; background: rgba(0,0,0,0.3); }
+        body.sb-open .overlay { opacity: 1; backdrop-filter: blur(8px); pointer-events: auto; }
         body.sb-open .drawer { transform: translateX(0); }
 
-        /* 气泡物理感 */
+        /* 气泡样式 */
         .bubble-u { background: #007AFF; color: white; border-radius: 20px 20px 4px 20px; }
-        .bubble-a { background: #F2F2F7; color: #1C1C1E; border-radius: 20px 20px 20px 4px; border: 0.5px solid rgba(0,0,0,0.05); }
-
-        /* Apple 三点浮动加载条 */
-        .loader-bubble { display: inline-flex; align-items: center; gap: 4px; padding: 12px 18px; background: #F2F2F7; border-radius: 20px; }
-        .dot { width: 6px; height: 6px; background: #94a3b8; border-radius: 50%; animation: apple-blink 1.4s infinite both; }
+        .bubble-a { background: #F2F2F7; color: #1C1C1E; border-radius: 20px 20px 20px 4px; }
+        
+        /* 三点跳动动画 */
+        .typing { display: flex; gap: 4px; padding: 12px 16px; align-items: center; }
+        .dot { width: 6px; height: 6px; background: #94a3b8; border-radius: 50%; animation: blink 1.4s infinite both; }
         .dot:nth-child(2) { animation-delay: 0.2s; }
         .dot:nth-child(3) { animation-delay: 0.4s; }
-        @keyframes apple-blink { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.1); } }
+        @keyframes blink { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.1); } }
 
         .no-sb::-webkit-scrollbar { display: none; }
-        pre { background: #1c1c1e !important; color: #e5e7eb; padding: 1rem; border-radius: 14px; margin: 0.5rem 0; overflow-x: auto; font-size: 13px; }
+        pre { background: #1c1c1e !important; color: #d1d1d6; padding: 1rem; border-radius: 14px; overflow-x: auto; font-size: 14px; }
     </style>
 </head>
 <body class="h-full bg-white flex overflow-hidden">
@@ -49,38 +52,38 @@ const WEB_UI_HTML = `
     
     <aside id="sb" class="drawer fixed md:relative h-full w-[280px] bg-[#1c1c1e] text-white -translate-x-full md:translate-x-0 flex flex-col z-50">
         <div class="p-6 flex flex-col h-full">
-            <button onclick="newChat()" class="w-full bg-[#3a3a3c] hover:bg-[#48484a] text-white rounded-2xl py-4 font-bold active:scale-95 transition-all">+ 新建对话</button>
-            <div id="sList" class="flex-grow overflow-y-auto mt-8 space-y-1 no-sb"></div>
-            <div class="mt-auto space-y-4 pt-6 border-t border-white/10 text-sm">
-                <input type="password" id="key" placeholder="API Key" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:ring-2 focus:ring-blue-500 outline-none">
-                <select id="mSel" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white outline-none cursor-pointer"></select>
-                <button onclick="syncM()" class="w-full text-blue-400 font-semibold py-2">验证并同步模型</button>
+            <button onclick="newChat()" class="w-full bg-[#3a3a3c] text-white rounded-2xl py-4 font-bold active:scale-95 transition-all">+ 新对话</button>
+            <div id="sList" class="flex-grow overflow-y-auto mt-6 space-y-1 no-sb"></div>
+            <div class="mt-auto space-y-4 pt-6 border-t border-white/10">
+                <input type="password" id="key" placeholder="API Key" class="w-full bg-white/5 rounded-xl px-4 py-3 text-white">
+                <select id="mSel" class="w-full bg-white/5 rounded-xl px-4 py-3 text-white"></select>
+                <button onclick="syncM()" class="w-full text-blue-400 text-xs font-bold py-2">同步模型列表</button>
             </div>
         </div>
     </aside>
 
-    <main class="flex-grow flex flex-col h-full bg-white relative">
-        <nav class="h-[60px] flex items-center justify-between px-4 border-b border-gray-100 bg-white/80 backdrop-blur-md sticky top-0 z-30">
+    <main class="flex-grow flex flex-col h-full bg-white">
+        <nav class="h-[60px] flex items-center px-4 border-b border-gray-50 bg-white/80 backdrop-blur-md justify-between">
             <div class="flex items-center gap-2">
-                <button onclick="toggleSB()" class="p-2 active:bg-gray-100 rounded-full"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg></button>
-                <h1 id="cTitle" class="font-bold text-lg tracking-tight truncate">Gemini WebUI</h1>
+                <button onclick="toggleSB()" class="p-2"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg></button>
+                <h1 id="cTitle" class="font-bold text-sm" onclick="rnChat()">Gemini WebUI</h1>
             </div>
         </nav>
 
-        <div id="box" class="flex-grow overflow-y-auto px-4 py-8 md:px-24 lg:px-48 space-y-8 no-sb"></div>
+        <div id="box" class="flex-grow overflow-y-auto px-4 py-6 md:px-24 lg:px-48 space-y-8 no-sb"></div>
 
-        <div class="p-4 bg-white/90 backdrop-blur-xl border-t border-gray-100">
-            <div id="fPre" class="max-w-4xl mx-auto flex flex-wrap gap-2 mb-3"></div>
-            <div class="max-w-4xl mx-auto flex items-end gap-2 bg-[#F2F2F7] rounded-[24px] p-1.5 transition-all focus-within:bg-[#E5E5EA]">
-                <label class="p-3 text-gray-400 hover:text-gray-600 cursor-pointer"><svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><input type="file" id="fInp" class="hidden" multiple onchange="hFiles(this)"></label>
-                <textarea id="uInp" rows="1" class="flex-grow bg-transparent border-none focus:ring-0 p-2.5 text-[17px] max-h-48 resize-none" placeholder="输入消息..."></textarea>
-                <button onclick="send()" class="bg-[#007AFF] text-white p-3 rounded-full shadow-lg active:scale-90 transition-all"><svg width="20" height="20" fill="none" stroke="white" stroke-width="3" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg></button>
+        <div class="p-4 bg-white border-t border-gray-50 pb-[env(safe-area-inset-bottom)]">
+            <div id="fPre" class="max-w-4xl mx-auto flex flex-wrap gap-2 mb-2"></div>
+            <div class="max-w-4xl mx-auto flex items-end gap-2 bg-[#F2F2F7] rounded-[24px] p-2">
+                <label class="p-3 text-gray-400 cursor-pointer"><svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><input type="file" id="fInp" class="hidden" multiple onchange="hFiles(this)"></label>
+                <textarea id="uInp" rows="1" class="flex-grow bg-transparent p-2.5 text-[17px] resize-none" placeholder="输入消息..."></textarea>
+                <button onclick="send()" class="bg-[#007AFF] text-white p-3 rounded-full active:scale-90 transition-all"><svg width="20" height="20" fill="none" stroke="white" stroke-width="3" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg></button>
             </div>
         </div>
     </main>
 
     <script>
-        let ss = JSON.parse(localStorage.getItem('g_final_v2') || '[]');
+        let ss = JSON.parse(localStorage.getItem('g_stable_v3') || '[]');
         let cur = localStorage.getItem('g_id') || null;
         let pFs = [];
 
@@ -93,8 +96,7 @@ const WEB_UI_HTML = `
         function toggleSB() { document.body.classList.toggle('sb-open'); }
         function newChat() { const id = Date.now().toString(); ss.unshift({id, title: '新对话', msgs: []}); sv(id); }
         function swSession(id) { cur = id; localStorage.setItem('g_id', id); const s = ss.find(x => x.id === id); document.getElementById('cTitle').innerText = s.title; rMsgs(); rList(); if(window.innerWidth < 768) document.body.classList.remove('sb-open'); }
-        function sv(id) { localStorage.setItem('g_final_v2', JSON.stringify(ss)); if(id) swSession(id); else rList(); }
-        
+        function sv(id) { localStorage.setItem('g_stable_v3', JSON.stringify(ss)); if(id) swSession(id); else rList(); }
         function rList() { document.getElementById('sList').innerHTML = ss.map(s => \`<div onclick="swSession('\${s.id}')" class="px-4 py-3.5 rounded-xl cursor-pointer \${s.id === cur ? 'bg-[#3a3a3c] text-white' : 'text-gray-400 hover:bg-white/5'}"><div class="truncate text-sm font-medium">\${s.title}</div></div>\`).join(''); }
 
         async function hFiles(inp) {
@@ -104,7 +106,7 @@ const WEB_UI_HTML = `
                 if(f.type.startsWith('image/')) r.readAsDataURL(f); else r.readAsText(f);
             }
         }
-        function rFPre() { document.getElementById('fPre').innerHTML = pFs.map((f, i) => \`<div class="bg-blue-50 text-blue-600 px-3 py-1.5 rounded-full text-xs font-bold">\${f.n} <span class="cursor-pointer" onclick="pFs.splice(\${i},1);rFPre()">✕</span></div>\`).join(''); }
+        function rFPre() { document.getElementById('fPre').innerHTML = pFs.map((f, i) => \`<div class="bg-gray-100 px-3 py-1 rounded-full text-xs">\${f.n} <span class="cursor-pointer" onclick="pFs.splice(\${i},1);rFPre()">✕</span></div>\`).join(''); }
 
         async function send() {
             const txt = document.getElementById('uInp').value.trim();
@@ -122,19 +124,19 @@ const WEB_UI_HTML = `
 
             s.msgs.push({role:'user', parts:pts, imgs});
             pFs = []; rFPre(); document.getElementById('uInp').value = '';
+            document.getElementById('uInp').style.height = 'auto';
             rMsgs(); await ask(s);
         }
 
         async function ask(s) {
             const m = document.getElementById('mSel').value;
             const k = document.getElementById('key').value;
-            const box = document.getElementById('box');
             
-            // 立即插入等待气泡
+            const box = document.getElementById('box');
             const loader = document.createElement('div');
-            loader.id = "apple-loader";
+            loader.id = "loader";
             loader.className = "flex justify-start";
-            loader.innerHTML = \`<div class="loader-bubble"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>\`;
+            loader.innerHTML = \`<div class="bubble-a"><div class="typing"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div></div>\`;
             box.appendChild(loader);
             box.scrollTop = box.scrollHeight;
 
@@ -148,31 +150,28 @@ const WEB_UI_HTML = `
 
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
-                let buffer = ""; 
+                let fullTxt = "";
                 
                 while(true) {
                     const {done, value} = await reader.read();
                     if(done) break;
                     
-                    if(document.getElementById("apple-loader")) document.getElementById("apple-loader").remove();
+                    if(document.getElementById("loader")) document.getElementById("loader").remove();
 
-                    buffer += decoder.decode(value, {stream: true});
-                    let start = buffer.indexOf('{"text":');
-                    while (start !== -1) {
-                        let end = buffer.indexOf('"}', start);
-                        if (end !== -1) {
-                            try {
-                                const val = JSON.parse(buffer.substring(start, end + 2)).text;
-                                s.msgs[idx].parts[0].text += val;
-                                rMsgs(true);
-                            } catch(e){}
-                            buffer = buffer.substring(end + 2);
-                            start = buffer.indexOf('{"text":');
-                        } else break;
+                    const chunk = decoder.decode(value);
+                    // 使用最稳健的全局正则匹配
+                    const matches = chunk.matchAll(/"text"\\s*:\\s*"(.*?)"/g);
+                    for(const match of matches) {
+                        try {
+                            const unescaped = JSON.parse('{"t":"' + match[1] + '"}').t;
+                            fullTxt += unescaped;
+                            s.msgs[idx].parts[0].text = fullTxt;
+                            rMsgs(true);
+                        } catch(e){}
                     }
                 }
                 sv();
-            } catch(e){ if(document.getElementById("apple-loader")) document.getElementById("apple-loader").remove(); }
+            } catch(e){ if(document.getElementById("loader")) document.getElementById("loader").remove(); }
         }
 
         function rMsgs(silent=false) {
@@ -181,9 +180,9 @@ const WEB_UI_HTML = `
             b.innerHTML = s.msgs.map((m, i) => \`
                 <div class="flex \${m.role==='user'?'justify-end':'justify-start'}">
                     <div class="max-w-[92%] md:max-w-[80%]">
-                        <div class="px-5 py-3.5 \${m.role==='user'?'bubble-u shadow-lg shadow-blue-500/10':'bubble-a'} shadow-sm">
+                        <div class="px-5 py-3.5 \${m.role==='user'?'bubble-u':'bubble-a'} shadow-sm">
                             \${m.imgs?m.imgs.map(img=>\`<img src="\${img}" class="rounded-xl mb-3 max-h-80">\`).join(''):''}
-                            <div class="text-[17px] leading-relaxed prose \${m.role==='user'?'prose-invert':''}">\${marked.parse(m.parts[0].text || '...')}</div>
+                            <div class="text-[17px] leading-relaxed prose \${m.role==='user'?'prose-invert':''}">\${marked.parse(m.parts[0].text || '')}</div>
                         </div>
                     </div>
                 </div>\`).join('');
@@ -205,15 +204,12 @@ const WEB_UI_HTML = `
 </body>
 </html>
 `;
-// --- [前端 WebUI 模板结束] ---
 
-
-// --- [后端 代理逻辑开始] ---
+// --- [后端代码] ---
 app.get('/', (req, res) => res.send(WEB_UI_HTML));
 
 app.all(/(.*)/, async (req, res) => {
     if (req.path === '/' || req.path === '/favicon.ico') return;
-    
     let apiKey = req.headers['x-goog-api-key'] || req.query.key || (req.headers.authorization ? req.headers.authorization.replace('Bearer ', '') : null);
     if (!apiKey) return res.status(401).json({ error: "Key Required" });
 
@@ -221,15 +217,9 @@ app.all(/(.*)/, async (req, res) => {
 
     try {
         const response = await axios({
-            method: req.method,
-            url: targetUrl,
-            headers: { 'Content-Type': 'application/json' },
-            data: req.body,
-            validateStatus: () => true,
-            responseType: 'stream',
-            decompress: true 
+            method: req.method, url: targetUrl, headers: { 'Content-Type': 'application/json' },
+            data: req.body, validateStatus: () => true, responseType: 'stream', decompress: true 
         });
-
         res.status(response.status);
         finished(response.data, () => res.end());
         response.data.pipe(res);
@@ -238,6 +228,4 @@ app.all(/(.*)/, async (req, res) => {
     }
 });
 
-process.on('uncaughtException', (err) => console.log('Safety:', err.message));
-app.listen(PORT, () => console.log(`🚀 服务已启动: http://localhost:${PORT}`));
-// --- [后端 代理逻辑结束] ---
+app.listen(PORT, () => console.log(`🚀 稳健版启动: http://localhost:${PORT}`));
