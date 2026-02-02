@@ -1,11 +1,12 @@
 const express = require('express');
 const axios = require('axios');
 const { finished } = require('stream');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 彻底放开负载限制，支持超长文本和多图
+// 【后端硬核配置】
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
@@ -15,175 +16,283 @@ const WEB_UI_HTML = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=0">
-    <title>Gemini WebUI Pro</title>
+    <title>WebUI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
     <style>
-        /* 【暴力外部优化：干掉所有系统边框】 */
+        /* 【外部样式优化：彻底消除系统干扰】 */
         * { 
             -webkit-tap-highlight-color: transparent !important; 
             outline: none !important; 
             box-shadow: none !important;
+            -webkit-overflow-scrolling: touch;
         }
         
-        /* 针对输入框的深度清洗 */
-        textarea, input, select, button {
+        /* 隐藏所有丑陋滚动条 */
+        ::-webkit-scrollbar { display: none; }
+        * { scrollbar-width: none; }
+
+        textarea, input, select {
             -webkit-appearance: none;
             outline: none !important;
             border: none !important;
+            background: transparent;
         }
-        
-        /* 移动端选中时的蓝色/黄色框彻底消失 */
+
+        /* 针对 iOS/Android 选中边框的死刑判决 */
         textarea:focus, input:focus {
             outline: 0 !important;
-            -webkit-tap-highlight-color: rgba(0,0,0,0) !important;
+            border: none !important;
         }
 
         body { 
-            font-family: -apple-system, system-ui, sans-serif; 
-            background: #fff; 
-            -webkit-font-smoothing: antialiased;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+            background-color: #ffffff;
+            color: #1c1c1e;
+            display: flex;
+            height: 100%;
+            overflow: hidden;
         }
 
-        /* Apple 物理抽屉 */
-        .drawer { 
-            transition: transform 0.6s cubic-bezier(0.23, 1, 0.32, 1); 
-            z-index: 1001;
+        /* 侧边栏物理动效 */
+        .sidebar {
+            width: 280px;
             background: #1c1c1e;
+            color: white;
+            transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 100;
         }
-        .overlay { 
-            transition: opacity 0.5s ease; 
-            background: rgba(0,0,0,0.3); 
-            backdrop-filter: blur(10px); 
-            opacity: 0; 
-            pointer-events: none; 
-            z-index: 1000;
-        }
-        body.sb-open .overlay { opacity: 1; pointer-events: auto; }
-        body.sb-open .drawer { transform: translateX(0); }
-
-        /* 聊天气泡：极致 Apple 质感 */
-        .bubble-u { 
-            background: #007AFF; 
-            color: #fff; 
-            border-radius: 20px 20px 4px 20px; 
-            box-shadow: 0 4px 12px rgba(0,122,255,0.2);
-        }
-        .bubble-a { 
-            background: rgba(242, 242, 247, 0.8); 
-            backdrop-filter: blur(5px);
-            color: #1c1c1e; 
-            border-radius: 20px 20px 20px 4px; 
-            border: 0.5px solid rgba(0,0,0,0.05);
+        @media (max-width: 768px) {
+            .sidebar { position: fixed; height: 100%; transform: translateX(-100%); }
+            body.sb-open .sidebar { transform: translateX(0); }
         }
 
-        /* 修复后的打字机动画 */
-        .dot { width: 6px; height: 6px; background: #94a3b8; border-radius: 50%; animation: blink 1.4s infinite both; }
+        /* 遮罩层 */
+        .overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            backdrop-filter: blur(8px);
+            z-index: 90;
+        }
+        body.sb-open .overlay { display: block; }
+
+        /* 消息气泡质感 */
+        .bubble-user {
+            background: #007AFF;
+            color: white;
+            border-radius: 20px 20px 4px 20px;
+            box-shadow: 0 4px 15px rgba(0,122,255,0.15);
+        }
+        .bubble-bot {
+            background: #F2F2F7;
+            color: #1c1c1e;
+            border-radius: 20px 20px 20px 4px;
+        }
+
+        /* 加载动画 */
+        .typing-loader {
+            display: flex;
+            gap: 4px;
+            padding: 10px 15px;
+            background: #F2F2F7;
+            border-radius: 15px;
+            width: fit-content;
+        }
+        .dot {
+            width: 6px;
+            height: 6px;
+            background: #94a3b8;
+            border-radius: 50%;
+            animation: blink 1.4s infinite both;
+        }
         @keyframes blink { 0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1.1); } }
-        
-        pre { background: #000 !important; color: #d1d1d6; padding: 16px; border-radius: 12px; font-size: 14px; overflow-x: auto; margin: 12px 0; }
-        .no-sb::-webkit-scrollbar { display: none; }
+
+        /* 代码块样式增强 */
+        pre {
+            background: #000 !important;
+            padding: 15px;
+            border-radius: 12px;
+            margin: 10px 0;
+            overflow-x: auto;
+            position: relative;
+        }
+        .copy-btn {
+            position: absolute;
+            right: 8px;
+            top: 8px;
+            padding: 4px 8px;
+            background: rgba(255,255,255,0.1);
+            color: #fff;
+            border-radius: 6px;
+            font-size: 10px;
+            cursor: pointer;
+        }
+
+        /* 移动端适配 */
+        .safe-area-bottom { padding-bottom: env(safe-area-inset-bottom); }
     </style>
 </head>
-<body class="h-full flex overflow-hidden">
-    <div onclick="document.body.classList.remove('sb-open')" class="overlay fixed inset-0"></div>
+<body class="h-full">
+    <div class="overlay" onclick="toggleSidebar()"></div>
     
-    <aside class="drawer fixed md:relative h-full w-[300px] -translate-x-full md:translate-x-0 flex flex-col shadow-2xl">
-        <div class="p-6 flex flex-col h-full text-white">
-            <button onclick="newChat()" class="w-full bg-white/10 hover:bg-white/20 py-4 rounded-2xl font-bold transition-all active:scale-95 text-center">+ 新建对话</button>
-            <div id="sList" class="flex-grow overflow-y-auto mt-8 space-y-2 no-sb"></div>
-            <div class="mt-auto space-y-4 pt-6 border-t border-white/10">
-                <input type="password" id="key" placeholder="API Key" class="w-full bg-white/5 rounded-xl px-4 py-3 text-white text-sm border border-white/10">
-                <select id="mSel" class="w-full bg-white/5 rounded-xl px-4 py-3 text-white text-sm cursor-pointer border border-white/10 appearance-none"></select>
-                <button onclick="syncM()" class="w-full py-3 bg-blue-600 rounded-xl text-white text-sm font-bold active:scale-95">验证并刷新模型列表</button>
-            </div>
+    <aside class="sidebar flex flex-col">
+        <div class="p-6">
+            <button onclick="createNewSession()" class="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-2xl font-bold transition-all active:scale-95 shadow-lg">+ 新对话</button>
+        </div>
+        <div id="sessionList" class="flex-grow overflow-y-auto px-4 space-y-2"></div>
+        <div class="p-6 border-t border-white/10 space-y-4">
+            <input type="password" id="apiKey" placeholder="在此输入 API Key" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm">
+            <select id="modelSelector" class="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm appearance-none"></select>
+            <button onclick="fetchModels()" id="syncBtn" class="w-full text-blue-400 text-xs font-bold py-2">刷新模型列表</button>
         </div>
     </aside>
 
-    <main class="flex-grow flex flex-col h-full min-w-0 bg-white">
-        <header class="h-[60px] flex items-center px-4 border-b border-gray-100 bg-white/80 backdrop-blur-md justify-between sticky top-0 z-50">
-            <button onclick="document.body.classList.add('sb-open')" class="p-2 active:bg-gray-100 rounded-full">
+    <main class="flex-grow flex flex-col min-w-0 bg-white relative">
+        <header class="h-16 flex items-center px-4 justify-between border-b border-gray-100 bg-white/90 backdrop-blur-md sticky top-0 z-50">
+            <button onclick="toggleSidebar()" class="p-2 active:bg-gray-100 rounded-full md:hidden">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
             </button>
-            <span id="curTitle" class="font-bold text-lg truncate max-w-[200px]">新对话</span>
-            <div class="w-10"></div>
+            <div id="currentTitle" class="font-bold text-lg truncate mx-4">WebUI</div>
+            <button onclick="clearCurrentChat()" class="text-red-500 font-bold text-sm px-2">重置</button>
         </header>
 
-        <div id="box" class="flex-grow overflow-y-auto px-4 py-6 md:px-24 lg:px-48 space-y-8 no-sb"></div>
+        <div id="chatContainer" class="flex-grow overflow-y-auto px-4 py-6 md:px-24 lg:px-48 space-y-8"></div>
 
-        <div id="ld" class="px-4 md:px-24 lg:px-48 hidden mb-6">
-            <div class="flex gap-1.5 p-4 bg-gray-100 w-fit rounded-2xl"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>
+        <div id="loader" class="px-4 md:px-24 lg:px-48 hidden mb-6">
+            <div class="typing-loader">
+                <div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div>
+            </div>
         </div>
 
-        <footer class="p-4 bg-white border-t border-gray-50 pb-[env(safe-area-inset-bottom)]">
-            <div id="fPre" class="flex gap-2 mb-2 overflow-x-auto no-sb"></div>
-            <div class="max-w-4xl mx-auto flex items-end gap-2 bg-[#F2F2F7] rounded-[26px] p-2 transition-all focus-within:bg-[#E5E5EA]">
-                <label class="p-3 text-gray-500 cursor-pointer hover:text-blue-600"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><input type="file" id="fInp" class="hidden" multiple onchange="hFiles(this)"></label>
-                <textarea id="uInp" rows="1" class="flex-grow bg-transparent p-3 text-[17px] max-h-48 resize-none border-none focus:ring-0" placeholder="输入消息..."></textarea>
-                <button onclick="send()" class="bg-[#007AFF] text-white p-3.5 rounded-full shadow-lg active:scale-90 transition-all"><svg width="20" height="20" fill="none" stroke="white" stroke-width="3" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg></button>
+        <footer class="p-4 bg-white border-t border-gray-100 safe-area-bottom">
+            <div id="fileZone" class="max-w-4xl mx-auto flex flex-wrap gap-2 mb-2"></div>
+            <div class="max-w-4xl mx-auto flex items-end gap-2 bg-[#F2F2F7] rounded-[28px] p-2 focus-within:bg-[#E5E5EA] transition-all">
+                <label class="p-3 text-gray-500 hover:text-blue-600 cursor-pointer">
+                    <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                    <input type="file" id="fileInput" class="hidden" multiple onchange="handleFiles(this)">
+                </label>
+                <textarea id="userInput" rows="1" class="flex-grow p-3 text-[17px] max-h-48 resize-none" placeholder="输入消息..." onkeydown="onEnter(event)"></textarea>
+                <button onclick="doSend()" id="sendBtn" class="bg-[#007AFF] text-white p-3.5 rounded-full shadow-lg active:scale-90 transition-all">
+                    <svg width="20" height="20" fill="none" stroke="white" stroke-width="3" viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                </button>
             </div>
         </footer>
     </main>
 
     <script>
-        let ss = JSON.parse(localStorage.getItem('g_v10_final') || '[]');
-        let cur = localStorage.getItem('g_cur_id') || null;
-        let pFs = [];
+        // 【精华逻辑：对话管理系统】
+        let sessions = JSON.parse(localStorage.getItem('WEBUI_V12_DB') || '[]');
+        let activeId = localStorage.getItem('WEBUI_ACTIVE_ID') || null;
+        let pFiles = [];
 
         window.onload = () => {
-            document.getElementById('key').value = localStorage.getItem('g_key') || '';
-            if(!ss.length) newChat(); else sw(cur || ss[0].id);
-            syncM();
+            const k = localStorage.getItem('WEBUI_KEY') || '';
+            document.getElementById('apiKey').value = k;
+            if(!sessions.length) createNewSession(); else loadSession(activeId || sessions[0].id);
+            fetchModels(true);
+            marked.setOptions({
+                highlight: function(code) { return hljs.highlightAuto(code).value; }
+            });
         };
 
-        function newChat() { const id = Date.now().toString(); ss.unshift({id, title:'新对话', msgs:[]}); sv(id); }
-        function sw(id) { cur = id; localStorage.setItem('g_cur_id', id); const s = ss.find(x=>x.id===id); document.getElementById('curTitle').innerText = s.title; rMsgs(); rList(); document.body.classList.remove('sb-open'); }
-        function sv(id) { localStorage.setItem('g_v10_final', JSON.stringify(ss)); if(id) sw(id); else rList(); }
-        function rList() { document.getElementById('sList').innerHTML = ss.map(s => \`<div onclick="sw('\${s.id}')" class="px-5 py-4 rounded-2xl cursor-pointer truncate text-sm \${s.id === cur ? 'bg-blue-600 text-white font-bold shadow-lg' : 'text-gray-400 hover:bg-white/5'}">\${s.title}</div>\`).join(''); }
+        function toggleSidebar() { document.body.classList.toggle('sb-open'); }
 
-        async function hFiles(inp) {
+        function createNewSession() {
+            const id = Date.now().toString();
+            sessions.unshift({ id, title: '新对话', msgs: [] });
+            saveAndSwitch(id);
+        }
+
+        function loadSession(id) {
+            activeId = id;
+            localStorage.setItem('WEBUI_ACTIVE_ID', id);
+            const s = sessions.find(x => x.id === id);
+            document.getElementById('currentTitle').innerText = s.title;
+            renderAllMsgs();
+            renderSessionList();
+            document.body.classList.remove('sb-open');
+        }
+
+        function saveAndSwitch(id) {
+            localStorage.setItem('WEBUI_V12_DB', JSON.stringify(sessions));
+            if(id) loadSession(id); else renderSessionList();
+        }
+
+        function renderSessionList() {
+            const list = document.getElementById('sessionList');
+            list.innerHTML = sessions.map(s => \`
+                <div onclick="loadSession('\${s.id}')" class="group relative px-5 py-4 rounded-2xl cursor-pointer transition-all \${s.id === activeId ? 'bg-blue-600 text-white shadow-lg' : 'text-gray-400 hover:bg-white/5'}">
+                    <div class="truncate text-sm pr-6 font-medium">\${s.title}</div>
+                    <div onclick="event.stopPropagation(); deleteSession('\${s.id}')" class="absolute right-4 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 hover:text-red-400 transition-opacity">✕</div>
+                </div>
+            \`).join('');
+        }
+
+        function deleteSession(id) {
+            sessions = sessions.filter(s => s.id !== id);
+            if(id === activeId) activeId = sessions.length ? sessions[0].id : null;
+            if(!sessions.length) createNewSession(); else saveAndSwitch(activeId);
+        }
+
+        function clearCurrentChat() {
+            const s = sessions.find(x => x.id === activeId);
+            s.msgs = [];
+            saveAndSwitch(activeId);
+        }
+
+        // 【精华逻辑：多模态处理】
+        function handleFiles(inp) {
             for(let f of inp.files) {
                 const r = new FileReader();
                 r.onload = (e) => {
-                    pFs.push({n:f.name, t:f.type, d:e.target.result});
-                    document.getElementById('fPre').innerHTML += \`<div class="bg-gray-200 px-3 py-1 rounded-full text-xs font-bold">\${f.name}</div>\`;
+                    pFiles.push({n: f.name, t: f.type, d: e.target.result});
+                    renderFileZone();
                 };
                 if(f.type.startsWith('image/')) r.readAsDataURL(f); else r.readAsText(f);
             }
         }
 
-        async function syncM() {
-            const k = document.getElementById('key').value; if(!k) return;
-            localStorage.setItem('g_key', k);
-            try {
-                const r = await fetch('/v1beta/models?key=' + k);
-                const d = await r.json();
-                if(d.models) document.getElementById('mSel').innerHTML = d.models.filter(m=>m.name.includes('gemini')).map(m=>\`<option value="\${m.name}" \${m.name.includes('1.5-flash')?'selected':''}>\${m.displayName}</option>\`).join('');
-            } catch(e){}
+        function renderFileZone() {
+            const z = document.getElementById('fileZone');
+            z.innerHTML = pFiles.map((f, i) => \`
+                <div class="bg-gray-100 px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-2 border border-gray-200">
+                    <span>\${f.n}</span>
+                    <button onclick="pFiles.splice(\${i},1);renderFileZone()" class="text-gray-400 hover:text-red-500">✕</button>
+                </div>
+            \`).join('');
         }
 
-        async function send() {
-            const txt = document.getElementById('uInp').value.trim();
-            const k = document.getElementById('key').value;
-            if(!txt && !pFs.length) return;
-            const s = ss.find(x=>x.id===cur);
-            if(!s.msgs.length) s.title = txt.slice(0,12) || "附件分析";
-            
-            let pts = [{text: txt || "分析此内容"}];
-            pFs.forEach(f => {
+        async function doSend() {
+            const val = document.getElementById('userInput').value.trim();
+            const key = document.getElementById('apiKey').value;
+            if(!val && !pFiles.length) return;
+            if(!key) { alert('请输入 API Key'); return; }
+
+            localStorage.setItem('WEBUI_KEY', key);
+            const s = sessions.find(x => x.id === activeId);
+            if(!s.msgs.length) s.title = val.slice(0,15) || "图片分析";
+
+            let pts = [{text: val || "分析附件"}];
+            pFiles.forEach(f => {
                 if(f.t.startsWith('image/')) pts.push({inline_data:{mime_type:f.t, data:f.d.split(',')[1]}});
-                else pts[0].text += "\\n【文件: " + f.n + "】\\n" + f.d;
+                else pts[0].text += "\\n\\n【文件: " + f.n + "】\\n" + f.d;
             });
 
             s.msgs.push({role:'user', parts:pts});
-            pFs = []; document.getElementById('uInp').value = ''; document.getElementById('fPre').innerHTML = '';
-            rMsgs(); document.getElementById('ld').classList.remove('hidden');
+            pFiles = []; document.getElementById('userInput').value = ''; 
+            document.getElementById('fileZone').innerHTML = '';
+            renderAllMsgs();
+            document.getElementById('loader').classList.remove('hidden');
 
             try {
-                const m = document.getElementById('mSel').value;
-                const res = await fetch(\`/\${m}:streamGenerateContent?key=\${k}\`, {
+                const model = document.getElementById('modelSelector').value;
+                const res = await fetch('/' + model + ':streamGenerateContent?key=' + key, {
                     method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({contents: s.msgs.map(x=>({role:x.role, parts:x.parts}))})
+                    body: JSON.stringify({ contents: s.msgs.map(m=>({role:m.role, parts:m.parts})) })
                 });
 
                 const reader = res.body.getReader();
@@ -195,40 +304,82 @@ const WEB_UI_HTML = `
                 while(true) {
                     const {done, value} = await reader.read();
                     if(done) break;
-                    document.getElementById('ld').classList.add('hidden');
+                    document.getElementById('loader').classList.add('hidden');
                     const chunk = decoder.decode(value);
+                    // 【精华逻辑：多重容错正则】
                     const matches = chunk.matchAll(/"text"\\s*:\\s*"(.*?)(?<!\\\\)"/g);
-                    for (const match of matches) {
+                    for (const m of matches) {
                         try {
-                            const val = JSON.parse('{"t":"' + match[1] + '"}').t;
-                            full += val;
+                            const unescaped = JSON.parse('{"t":"' + m[1] + '"}').t;
+                            full += unescaped;
                             s.msgs[midx].parts[0].text = full;
-                            rMsgs(true);
+                            renderAllMsgs(true);
                         } catch(e){}
                     }
                 }
-                sv();
-            } catch(e) { document.getElementById('ld').classList.add('hidden'); alert("API连接失败"); }
+                saveAndSwitch();
+            } catch(e) { 
+                document.getElementById('loader').classList.add('hidden');
+                alert("请求失败，检查 API Key 或网络"); 
+            }
         }
 
-        function rMsgs(sil=false) {
-            const b = document.getElementById('box');
-            const s = ss.find(x=>x.id===cur);
-            b.innerHTML = s.msgs.map(m => \`
+        function renderAllMsgs(sil=false) {
+            const box = document.getElementById('chatContainer');
+            const s = sessions.find(x => x.id === activeId);
+            box.innerHTML = s.msgs.map(m => \`
                 <div class="flex \${m.role==='user'?'justify-end':'justify-start'}">
-                    <div class="px-5 py-3.5 \${m.role==='user'?'bubble-u':'bubble-a'} text-[17px] max-w-[90%] leading-relaxed">
-                        \${marked.parse(m.parts[0].text || '')}
+                    <div class="max-w-[92%] md:max-w-[85%]">
+                        <div class="px-5 py-4 \${m.role==='user'?'bubble-user':'bubble-bot'}">
+                            <div class="prose \${m.role==='user'?'prose-invert':''} text-[17px] leading-relaxed">
+                                \${marked.parse(m.parts[0].text || '')}
+                            </div>
+                        </div>
                     </div>
-                </div>\`).join('');
-            if(!sil) b.scrollTo({top:b.scrollHeight, behavior:'smooth'}); else b.scrollTop = b.scrollHeight;
+                </div>
+            \`).join('');
+            if(!sil) box.scrollTo({top:box.scrollHeight, behavior:'smooth'}); else box.scrollTop = box.scrollHeight;
+            
+            // 为所有 pre 添加复制按钮
+            document.querySelectorAll('pre').forEach(pre => {
+                if(!pre.querySelector('.copy-btn')) {
+                    const btn = document.createElement('div');
+                    btn.className = 'copy-btn';
+                    btn.innerText = '复制';
+                    btn.onclick = () => {
+                        navigator.clipboard.writeText(pre.innerText.replace('复制', ''));
+                        btn.innerText = '已复制';
+                        setTimeout(() => btn.innerText = '复制', 2000);
+                    };
+                    pre.appendChild(btn);
+                }
+            });
         }
-        document.getElementById('uInp').oninput = function() { this.style.height = "auto"; this.style.height = (this.scrollHeight) + "px"; };
+
+        async function fetchModels(sil=false) {
+            const k = document.getElementById('apiKey').value; if(!k) return;
+            try {
+                const r = await fetch('/v1beta/models?key=' + k);
+                const d = await r.json();
+                if(d.models) {
+                    document.getElementById('modelSelector').innerHTML = d.models.filter(m=>m.name.includes('gemini')).map(m=>\`
+                        <option value="\${m.name}" \${m.name.includes('flash')?'selected':''}>\${m.displayName}</option>
+                    \`).join('');
+                }
+            } catch(e){}
+        }
+
+        function onEnter(e) { if(e.key === 'Enter' && !e.shiftKey && window.innerWidth > 768) { e.preventDefault(); doSend(); } }
+        document.getElementById('userInput').oninput = function() {
+            this.style.height = "auto";
+            this.style.height = (this.scrollHeight) + "px";
+        };
     </script>
 </body>
 </html>
 `;
 
-// --- 【真·后端转发：解决 SyntaxError 的最终补丁】 ---
+// --- 【精华版后端：Node 22 暴力转发补丁】 ---
 app.get('/', (req, res) => res.send(WEB_UI_HTML));
 
 app.all(/(.*)/, async (req, res) => {
@@ -237,33 +388,43 @@ app.all(/(.*)/, async (req, res) => {
     const apiKey = req.query.key || req.headers['x-goog-api-key'];
     if (!apiKey) return res.status(401).end();
 
-    // 修复逻辑：自动判断并补全 v1beta，支持所有 Gemini 接口
-    let targetPath = req.path;
-    if (!targetPath.includes('v1')) {
-        targetPath = '/v1beta' + (targetPath.startsWith('/') ? '' : '/') + targetPath;
+    let p = req.path;
+    if (!p.includes('v1')) {
+        p = '/v1beta' + (p.startsWith('/') ? '' : '/') + p;
     }
     
-    const targetUrl = 'https://generativelanguage.googleapis.com' + targetPath + '?key=' + apiKey;
+    // 强制使用最稳的加号拼接，防止任何反引号转义导致的 SyntaxError
+    const tUrl = 'https://generativelanguage.googleapis.com' + p + '?key=' + apiKey;
 
     try {
         const response = await axios({
             method: req.method,
-            url: targetUrl,
+            url: tUrl,
             data: req.body,
             responseType: 'stream',
             headers: { 'Content-Type': 'application/json' },
-            validateStatus: () => true, // 关键：转发所有错误码，不抛出异常
+            validateStatus: () => true, // 转发 400, 404, 500 等所有错误，让前端捕获
             maxContentLength: Infinity,
-            maxBodyLength: Infinity
+            maxBodyLength: Infinity,
+            timeout: 60000
         });
 
         res.status(response.status);
         response.data.pipe(res);
-        finished(response.data, () => res.end());
+        finished(response.data, (err) => {
+            if(err) console.error('流传输中断:', err.message);
+            res.end();
+        });
 
     } catch (e) {
+        console.error('转发层崩溃:', e.message);
         if (!res.headersSent) res.status(500).send(e.message);
     }
 });
 
-app.listen(PORT, () => console.log(`🚀 服务已在端口 ${PORT} 满血启动`));
+app.listen(PORT, () => {
+    console.log('-------------------------------------------');
+    console.log('✅ GEMINI WEBUI 究极完整版已满血启动');
+    console.log('🚀 运行地址: http://localhost:' + PORT);
+    console.log('-------------------------------------------');
+});
