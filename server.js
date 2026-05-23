@@ -1,267 +1,235 @@
+'use strict';
+
 const express = require('express');
-const axios = require('axios');
+const axios   = require('axios');
 const { v4: uuidv4 } = require('uuid');
-const url = require('url');
+const http    = require('http');
+const https   = require('https');
+const { URLSearchParams } = require('url');
+
+const PORT             = process.env.PORT || 3000;
+const UPSTREAM_HOST    = 'https://generativelanguage.googleapis.com';
+const DEFAULT_VERSION  = 'v1beta';
+const DEBUG_MODE       = process.env.DEBUG === 'true';
+const REQUEST_TIMEOUT  = parseInt(process.env.REQUEST_TIMEOUT || '120000', 10); // ms
+
+const axiosInstance = axios.create({
+    baseURL: UPSTREAM_HOST,
+    timeout: REQUEST_TIMEOUT,
+    httpAgent:  new http.Agent({ keepAlive: true, maxSockets: 64 }),
+    httpsAgent: new https.Agent({ keepAlive: true, maxSockets: 64 }),
+    validateStatus: () => true,
+    responseType: 'stream',
+    maxRedirects: 0,
+    decompress: false, 
+});
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// 配置常量
-const UPSTREAM_HOST = 'https://generativelanguage.googleapis.com';
-const DEFAULT_API_VERSION = 'v1beta';
-const DEBUG_MODE = process.env.DEBUG === 'true';
-
-// 增加 JSON 解析限制，对应 PHP 的 memory_limit
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// --------------------------------------------------------------------------
-// 辅助函数
-// --------------------------------------------------------------------------
-
 function debugLog(message, data = null) {
     if (!DEBUG_MODE) return;
-    const logData = {
+    console.log('GEMINI_PROXY:', JSON.stringify({
         timestamp: new Date().toISOString(),
-        message: message,
-        data: data
-    };
-    console.log('GEMINI_PROXY:', JSON.stringify(logData, null, 2));
+        message,
+        data: data ? sanitizeForLog(data) : null,
+    }));
+}
+
+function sanitizeForLog(obj) {
+    if (typeof obj === 'string') {
+        return obj.replace(/(key|token|api[_-]?key)=([^&\s"]+)/gi, '$1=***');
+    }
+    if (Array.isArray(obj)) return obj.map(sanitizeForLog);
+    if (obj && typeof obj === 'object') {
+        return Object.fromEntries(
+            Object.entries(obj).map(([k, v]) => [
+                k,
+                /^(key|token|api_?key|apikey)$/i.test(k) ? '***' : sanitizeForLog(v),
+            ])
+        );
+    }
+    return obj;
 }
 
 function extractApiKey(req) {
-    // 1. Header: x-goog-api-key
-    if (req.headers['x-goog-api-key']) return req.headers['x-goog-api-key'];
-    
-    // 2. Header: Authorization Bearer
+    const googKey = req.headers['x-goog-api-key'];
+    if (googKey) return googKey;
+
     const auth = req.headers['authorization'];
     if (auth) {
-        const match = auth.match(/^Bearer\s+(.+)$/i);
-        if (match) return match[1].trim();
+        const bearerMatch = auth.match(/^Bearer\s+(.+)$/i);
+        if (bearerMatch) return bearerMatch[1].trim();
         if (!auth.includes(' ')) return auth.trim();
     }
 
-    // 3. Query Parameters
-    const queryKeys = ['key', 'api_key', 'apikey', 'token', 'access_token'];
-    for (const key of queryKeys) {
-        if (req.query[key]) return req.query[key];
+    for (const k of ['key', 'api_key', 'apikey', 'token', 'access_token']) {
+        if (req.query[k]) return req.query[k];
     }
-    
+
     return null;
 }
 
-// 检查是否需要切换 API 版本 (如果 body 包含 v1 不支持的字段)
-function needsVersionDowngrade(body) {
-    if (!body || typeof body !== 'object') return false;
-    
-    const unsupportedInV1 = ['systemInstruction', 'tool_config', 'tool_calls'];
-    
-    // 检查根级别
-    for (const param of unsupportedInV1) {
-        if (body[param]) return true;
-    }
+const V1BETA_FIELDS = new Set(['systemInstruction', 'tool_config', 'tool_calls']);
 
-    // 检查 contents -> parts
-    if (body.contents && Array.isArray(body.contents)) {
-        for (const content of body.contents) {
-            if (content.parts && Array.isArray(content.parts)) {
-                for (const part of content.parts) {
-                    for (const param of unsupportedInV1) {
-                        if (part[param]) return true;
-                    }
-                }
-            }
-        }
+function requiresBeta(obj) {
+    if (!obj || typeof obj !== 'object') return false;
+    if (Array.isArray(obj)) return obj.some(requiresBeta);
+    for (const [k, v] of Object.entries(obj)) {
+        if (V1BETA_FIELDS.has(k)) return true;
+        if (requiresBeta(v)) return true;
     }
     return false;
 }
 
-// 移除不兼容字段的递归函数
-function removeUnsupportedFields(obj, fields) {
-    if (Array.isArray(obj)) {
-        obj.forEach(item => removeUnsupportedFields(item, fields));
-    } else if (obj && typeof obj === 'object') {
-        fields.forEach(field => {
-            if (field in obj) delete obj[field];
-        });
-        Object.values(obj).forEach(value => removeUnsupportedFields(value, fields));
+function makeV1Compatible(body) {
+    const clone = JSON.parse(JSON.stringify(body));
+    function strip(o) {
+        if (Array.isArray(o)) { o.forEach(strip); return; }
+        if (!o || typeof o !== 'object') return;
+        V1BETA_FIELDS.forEach(f => delete o[f]);
+        Object.values(o).forEach(strip);
     }
+    strip(clone);
+    return clone;
 }
 
-function makeBodyCompatible(body, targetVersion) {
-    if (!body || targetVersion !== 'v1') return body;
-    
-    // 深拷贝以避免修改原始引用
-    const newBody = JSON.parse(JSON.stringify(body));
-    const unsupportedFields = ['systemInstruction', 'tool_config', 'tool_calls'];
-    
-    removeUnsupportedFields(newBody, unsupportedFields);
-    return newBody;
-}
-
-// --------------------------------------------------------------------------
-// 中间件：CORS 和 基础 Header
-// --------------------------------------------------------------------------
+const CORS_ALLOW_METHODS  = 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD';
+const CORS_ALLOW_HEADERS  = [
+    'Content-Type', 'Authorization', 'X-API-Key', 'X-Requested-With',
+    'User-Agent', 'Accept', 'Origin', 'Cache-Control', 'X-Request-ID',
+    'X-Goog-Api-Key', 'X-Session-Token', 'X-Client-Version', 'X-Device-Id',
+].join(', ');
+const CORS_MAX_AGE = '86400';
 
 app.use((req, res, next) => {
-    // 设置 CORS
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD');
-    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Requested-With, User-Agent, Accept, Origin, Cache-Control, X-Request-ID, X-Goog-Api-Key, X-Session-Token, X-Client-Version, X-Device-Id');
-    res.header('Access-Control-Max-Age', '86400');
-    
-    // 性能统计 Header
-    const start = process.hrtime();
-    const requestId = uuidv4();
-    res.header('X-Request-ID', requestId);
+    const origin = req.headers['origin'] || '*';
 
-    res.on('finish', () => {
-        const diff = process.hrtime(start);
-        const timeMs = (diff[0] * 1000 + diff[1] / 1e6).toFixed(2);
-        res.header('X-Response-Time', `${timeMs}ms`);
-    });
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    if (origin !== '*') {
+        res.setHeader('Vary', 'Origin');
+    }
+    res.setHeader('Access-Control-Allow-Methods', CORS_ALLOW_METHODS);
+    res.setHeader('Access-Control-Allow-Headers', CORS_ALLOW_HEADERS);
+    res.setHeader('Access-Control-Max-Age', CORS_MAX_AGE);
 
     if (req.method === 'OPTIONS') {
         return res.status(204).end();
     }
-    
+
     next();
 });
 
-// --------------------------------------------------------------------------
-// 主处理逻辑
-// --------------------------------------------------------------------------
+app.get('/favicon.ico', (_, res) => res.status(204).end());
 
 app.all(/(.*)/, async (req, res) => {
-    // 忽略 favicon
-    if (req.path === '/favicon.ico') return res.status(404).end();
+    const requestId = uuidv4();
+    res.setHeader('X-Request-ID', requestId);
 
-    const apiKey = extractApiKey(req);
-    const method = req.method;
-    const path = req.path;
-    const body = req.body;
+    const { method, path, query, body } = req;
 
-    // Debug 路由
-    if (req.query.debug === 'true' || req.headers['http-debug'] === 'true') {
+    if (query.debug === 'true' || req.headers['http-debug'] === 'true') {
         return res.json({
-            debug: true,
-            method,
-            path,
-            api_key_found: !!apiKey,
+            debug: true, method, path,
             server_info: {
                 platform: process.platform,
                 node_version: process.version,
-                memory: process.memoryUsage()
-            }
+                memory: process.memoryUsage(),
+            },
         });
     }
 
+    const apiKey = extractApiKey(req);
     if (!apiKey) {
         return res.status(401).json({
-            error: {
-                code: 401,
-                message: 'API key not found',
-                status: 'UNAUTHENTICATED'
-            }
+            error: { code: 401, message: 'API key not found', status: 'UNAUTHENTICATED' },
         });
     }
 
-    // 版本控制逻辑
-    let targetVersion = DEFAULT_API_VERSION;
-    
-    // 尝试从路径中提取版本
-    const versionMatch = path.match(/^\/(v1|v1beta)\//);
+    const versionMatch = path.match(/^\/(v1beta|v1)\//);
+    let targetVersion;
     if (versionMatch) {
         targetVersion = versionMatch[1];
-    } else if (needsVersionDowngrade(body)) {
-        // 如果 Body 里有新特性，强制使用 beta
-        targetVersion = 'v1beta';
+    } else {
+        targetVersion = (body && requiresBeta(body)) ? 'v1beta' : DEFAULT_VERSION;
     }
 
-    // 兼容性处理
-    const compatibleBody = makeBodyCompatible(body, targetVersion);
+    const compatBody = (targetVersion === 'v1' && body) ? makeV1Compatible(body) : body;
 
-    // 构建目标 URL
     let targetPath = path;
-    if (!path.startsWith(`/${targetVersion}/`) && !path.startsWith(`/v1/`) && !path.startsWith(`/v1beta/`)) {
+    if (!/^\/(v1beta|v1)\//.test(path)) {
         targetPath = `/${targetVersion}${path.startsWith('/') ? '' : '/'}${path}`;
     }
-    
-    // 清理 URL 参数，移除 key 等
-    const queryParams = { ...req.query };
-    ['key', 'api_key', 'apikey', 'token', 'access_token', 'debug'].forEach(k => delete queryParams[k]);
-    queryParams.key = apiKey; // 将 key 重新加回去
 
-    const queryString = new url.URLSearchParams(queryParams).toString();
-    const targetUrl = `${UPSTREAM_HOST}${targetPath}${queryString ? '?' + queryString : ''}`;
+    const forwardQuery = { ...query };
+    ['key', 'api_key', 'apikey', 'token', 'access_token', 'debug'].forEach(k => delete forwardQuery[k]);
+    forwardQuery.key = apiKey;
+    const qs = new URLSearchParams(forwardQuery).toString();
+    const targetUrl = `${targetPath}${qs ? '?' + qs : ''}`;
 
-    // 构建请求 Header
-    const upstreamHeaders = {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Gemini-API-Proxy/Node-No-Limits'
-    };
-    
-    // 转发部分 Header (跳过敏感和自动处理的 Header)
-    const skipHeaders = ['host', 'connection', 'content-length', 'x-goog-api-key', 'authorization', 'x-api-key', 'api-key', 'accept-encoding'];
-    Object.entries(req.headers).forEach(([key, value]) => {
-        if (!skipHeaders.includes(key.toLowerCase())) {
-            upstreamHeaders[key] = value;
-        }
-    });
+    const SKIP_HEADERS = new Set([
+        'host', 'connection', 'keep-alive', 'content-length', 'transfer-encoding',
+        'x-goog-api-key', 'authorization', 'x-api-key', 'api-key', 'accept-encoding',
+    ]);
+    const upstreamHeaders = { 'Content-Type': 'application/json' };
+    for (const [k, v] of Object.entries(req.headers)) {
+        if (!SKIP_HEADERS.has(k.toLowerCase())) upstreamHeaders[k] = v;
+    }
 
-    debugLog('转发请求', {
-        url: targetUrl.replace(apiKey, '***'),
-        method,
-        version: targetVersion
-    });
+    debugLog('转发请求', { url: targetUrl, method, version: targetVersion });
 
     try {
-        // 发送请求到 Google
-        const response = await axios({
-            method: method,
+        const response = await axiosInstance({
+            method,
             url: targetUrl,
             headers: upstreamHeaders,
-            data: ['POST', 'PUT', 'PATCH'].includes(method) ? compatibleBody : undefined,
-            validateStatus: () => true, // 允许所有状态码通过，不抛出错误
-            responseType: 'stream' // 关键：使用流式响应，支持 SSE
+            data: ['POST', 'PUT', 'PATCH'].includes(method) ? compatBody : undefined,
         });
 
-        // 设置响应 Header
-        const responseHeaders = response.headers;
-        const safeHeaders = [
+        const SAFE_HEADERS = new Set([
             'content-type', 'content-encoding', 'cache-control',
             'expires', 'last-modified', 'etag', 'vary',
-            'x-goog-generation', 'x-goog-metageneration'
-        ];
-
-        Object.entries(responseHeaders).forEach(([key, value]) => {
-            if (safeHeaders.includes(key.toLowerCase()) || key.startsWith('x-goog-')) {
-                res.setHeader(key, value);
+        ]);
+        for (const [k, v] of Object.entries(response.headers)) {
+            const lk = k.toLowerCase();
+            if (SAFE_HEADERS.has(lk) || lk.startsWith('x-goog-')) {
+                res.setHeader(k, v);
             }
-        });
-
-        res.setHeader('X-Proxy-Request-ID', uuidv4());
+        }
+        res.setHeader('X-Proxy-Request-ID', requestId); // 复用同一 ID，减少 UUID 生成
         res.status(response.status);
 
-        // 管道转发响应体
+        response.data.on('error', (streamErr) => {
+            debugLog('上游流错误', streamErr.message);
+            if (!res.headersSent) res.status(502).end();
+            else res.end();
+        });
         response.data.pipe(res);
 
     } catch (error) {
         debugLog('代理错误', error.message);
+
+        const isTimeout = error.code === 'ECONNABORTED' || error.message?.includes('timeout');
         if (!res.headersSent) {
-            res.status(502).json({
+            res.status(isTimeout ? 504 : 502).json({
                 error: {
-                    code: 502,
-                    message: 'Failed to connect to Google Gemini API: ' + error.message,
-                    status: 'BAD_GATEWAY'
-                }
+                    code: isTimeout ? 504 : 502,
+                    message: isTimeout
+                        ? 'Upstream request timed out'
+                        : 'Failed to connect to Google Gemini API: ' + error.message,
+                    status: isTimeout ? 'GATEWAY_TIMEOUT' : 'BAD_GATEWAY',
+                },
             });
         }
     }
 });
 
-// 启动服务器
 app.listen(PORT, () => {
-    console.log(`Gemini Proxy is running on port ${PORT}`);
-    console.log(`Upstream: ${UPSTREAM_HOST}`);
+    console.log(`✓ Gemini Proxy running on port ${PORT}`);
+    console.log(`✓ Upstream: ${UPSTREAM_HOST}`);
+    console.log(`✓ Default API version: ${DEFAULT_VERSION}`);
+    console.log(`✓ Request timeout: ${REQUEST_TIMEOUT}ms`);
+    if (DEBUG_MODE) console.log('⚠ DEBUG mode enabled');
 });
